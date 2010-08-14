@@ -17,6 +17,7 @@ trait Type {
   def name: String
 
   def parse(buffer: ByteArray, pos: PositionType): Instance
+  def repr(instance: Instance): String
   //def length: Option[Long]
   //def valueToString(
 }
@@ -26,6 +27,7 @@ trait Type {
  */
 trait Struct extends Type {
   def members: List[(String, Type)]
+  def find(name: String): Option[Type]
   override def parse(array: ByteArray, pos: PositionType): CompositeInstance
 }
 
@@ -67,6 +69,7 @@ trait Position {
  */
 trait ByteRange {
   def data: ByteBuffer
+  def dataBytes: Array[Byte]
   def positionAfter: PositionType
 }
 
@@ -76,6 +79,8 @@ trait ByteRange {
 trait Instance {
   def tpe: Type
   def range: ByteRange
+
+  def repr: String = tpe.repr(this)
 }
 
 trait InstanceCollection extends Instance {
@@ -98,6 +103,11 @@ package impl {
   case class ByteRange(val array: ByteArray, val offset: PositionType, val length: Int) extends dualis.ByteRange {
     def data = array.bytesAt(offset, length)
     def positionAfter = offset + length
+    def dataBytes = {
+      val buffer = new Array[Byte](length)
+      data.get(buffer)
+      buffer
+    }
   }
 
   case class SimpleInstance(val tpe: Type, val range: dualis.ByteRange) extends Instance
@@ -108,7 +118,9 @@ package impl {
   }
 
   object Primitives {
-    case object Byte extends PrimitiveType("Byte", 1)
+    case object Byte extends PrimitiveType("Byte", 1) {
+      def repr(i: Instance): String = "%02x" format i.range.data.get
+    }
   }
 
   case class CompositeInstance(val tpe: Type, val range: dualis.ByteRange, val namedMembers: List[(String, Instance)])
@@ -129,6 +141,13 @@ package impl {
       
       CompositeInstance(this, ByteRange(buffer, pos, afterLast - pos), memberInstances)
     }
+
+    override def repr(i: Instance): String = {
+      val memberReprs =
+        i.asInstanceOf[CompositeInstance].namedMembers map { case (name, i) => name+": "+find(name).get.name+" = "+i.repr}
+      
+      "{\n"+memberReprs.mkString("\t","","\n")+"}"
+    }
   }
 
   case class InstanceCollection(val tpe: Type, val range: dualis.ByteRange, val members: List[Instance])
@@ -148,8 +167,16 @@ package impl {
           }
         }
       
-      InstanceCollection(this, ByteRange(buffer, pos, afterLast - pos), memberInstances)
+      InstanceCollection(this, ByteRange(buffer, pos, afterLast - pos), memberInstances.reverse)
     }
+
+    override def repr(i: Instance): String = {
+      val MAX = 5
+      val membs = i.asInstanceOf[InstanceCollection].members
+      val memrep = membs take MAX map (_.repr)
+      "["+memrep.mkString(", ")+(if (membs.size > MAX) ", ..." else "")+"]"
+    }
+    override def name: String = elementType.name+"["+length+"]"
   }
 
   abstract class MutableType(var name: String = "unnamed") extends Type
@@ -162,7 +189,7 @@ package impl {
     override def members = _members.toList
   }
   class MutableFixedArray(var elementType: Type, var length: Long) 
-    extends MutableType with dualis.FixedArray with impl.FixedArrayImpl
+    extends Type with dualis.FixedArray with impl.FixedArrayImpl
 
   import java.io._
   class FileByteArray(f: File) extends ByteArray {
@@ -174,7 +201,8 @@ package impl {
     override def size = f.length
     override def bytesAt(pos: Int, length: Int) = {
       val buffer = ByteBuffer.allocate(length)
-      channel.read(buffer, pos)
+      val read = channel.read(buffer, pos)
+      buffer.position(0)
       buffer
     }
   }
@@ -188,18 +216,19 @@ object Dualis {
 
   def readLine = reader.readLine
 
-  def dispatch(cmd: String) = cmd match {
-    case Exit() | null => exit(0)
-    case _ => println("Command not found: '"+cmd+"'")
-  }
-
   def repl(file: ByteArray) {
     val root = new impl.MutableStruct("unnamed")
     root.add("bytes" -> new impl.MutableFixedArray(impl.Primitives.Byte, file.size))
 
     var instance = root.parse(file, 0)
 
+    def dispatch(cmd: String) = cmd match {
+      case Exit() | null => exit(0)
+      case _ => println("Command not found: '"+cmd+"'")
+    }
+
     while(true) {
+      println("root: "+root.name+" = "+instance.repr+"\n")
       print("> ")
       val cmd = readLine
 
@@ -207,7 +236,7 @@ object Dualis {
     }
   }
   def main(args: Array[String]) {
-    println("Hello")
+    println("This is dualis working on file "+args(0)+"\n")
     repl(new impl.FileByteArray(new File(args(0))))
   }
 }
