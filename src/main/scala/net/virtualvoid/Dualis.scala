@@ -2,20 +2,23 @@ package net.virtualvoid.dualis
 
 import scala.collection.mutable._
 
+import java.nio.ByteBuffer
+
 /**
  * A tool for analysis of binary representations
  */
 
-trait Type {
-  def name: String
-  //def length: Option[Long]
-  //def valueToString(
+trait ByteArray {
+  def bytesAt(offset: PositionType, length: Int): ByteBuffer
+  def size: Long
 }
 
-abstract class PrimitiveType(val name: String) extends Type
+trait Type {
+  def name: String
 
-object Primitives {
-  case object Byte extends PrimitiveType("Byte")
+  def parse(buffer: ByteArray, pos: PositionType): Instance
+  //def length: Option[Long]
+  //def valueToString(
 }
 
 /**
@@ -23,6 +26,7 @@ object Primitives {
  */
 trait Struct extends Type {
   def members: List[(String, Type)]
+  override def parse(array: ByteArray, pos: PositionType): CompositeInstance
 }
 
 /**
@@ -34,20 +38,21 @@ trait MagicNumber extends Type {
 
 trait InstanceArray extends Type {
   def elementType: Type
+  override def parse(array: ByteArray, pos: PositionType): InstanceCollection
 }
 
 /**
  * An array of constant size
  */
 trait FixedArray extends InstanceArray {
-  
+  def length: Long
 }
 
 /**
  * An array of `elementType` which depends on a length field read before
  */
 trait DynamicArray extends InstanceArray {
-  def length: Type
+  def lengthTpe: Type
 }
 
 /**
@@ -60,7 +65,10 @@ trait Position {
 /**
  * A range inside a bytestream
  */
-trait ByteRange
+trait ByteRange {
+  def data: ByteBuffer
+  def positionAfter: PositionType
+}
 
 /*
  * An instance of a type at runtime
@@ -70,27 +78,106 @@ trait Instance {
   def range: ByteRange
 }
 
+trait InstanceCollection extends Instance {
+  def members: List[Instance]
+}
+
+trait CompositeInstance extends InstanceCollection {
+  def namedMembers: List[(String, Instance)]
+
+  override def members = namedMembers map (_._2)
+}
+
 // List[ByteRange => Instance]
 trait Covering
 
-trait ByteArray {
-  def bytesAt(offset: Long, length: Long): Array[Byte]
-  def size: Long
-}
 
 package impl {
   import net.virtualvoid.dualis
 
+  case class ByteRange(val array: ByteArray, val offset: PositionType, val length: Int) extends dualis.ByteRange {
+    def data = array.bytesAt(offset, length)
+    def positionAfter = offset + length
+  }
+
+  case class SimpleInstance(val tpe: Type, val range: dualis.ByteRange) extends Instance
+
+  abstract class PrimitiveType(val name: String, bytes: Int) extends Type {
+    override def parse(buffer: ByteArray, pos: PositionType): Instance =
+      SimpleInstance(this, ByteRange(buffer, pos, bytes))
+  }
+
+  object Primitives {
+    case object Byte extends PrimitiveType("Byte", 1)
+  }
+
+  case class CompositeInstance(val tpe: Type, val range: dualis.ByteRange, val namedMembers: List[(String, Instance)])
+       extends dualis.CompositeInstance
+
+  trait StructImpl extends Struct {
+    override def parse(buffer: ByteArray, pos: PositionType): CompositeInstance = {
+      case class State(instances: List[(String, Instance)], pos: PositionType)
+      
+      val State(memberInstances, afterLast) = 
+        members.foldLeft(State(Nil, pos)) { (state, member) =>
+          (state, member) match {
+            case (State(rest, pos), (name, tpe)) =>
+              val next = tpe.parse(buffer, state.pos)
+            State((name, next)::state.instances, next.range.positionAfter)
+          }
+        }
+      
+      CompositeInstance(this, ByteRange(buffer, pos, afterLast - pos), memberInstances)
+    }
+  }
+
+  case class InstanceCollection(val tpe: Type, val range: dualis.ByteRange, val members: List[Instance])
+    extends dualis.InstanceCollection
+
+  trait FixedArrayImpl extends dualis.FixedArray {
+    override def parse(buffer: ByteArray, pos: PositionType): dualis.InstanceCollection = {
+      // Factor out with StructImpl
+      case class State(instances: List[Instance], pos: PositionType)
+      
+      val State(memberInstances, afterLast) = 
+        (0L until length).foldLeft(State(Nil, pos)) { (state, member) =>
+          state match {
+            case State(rest, pos) =>
+              val next = elementType.parse(buffer, state.pos)
+              State(next::state.instances, next.range.positionAfter)
+          }
+        }
+      
+      InstanceCollection(this, ByteRange(buffer, pos, afterLast - pos), memberInstances)
+    }
+  }
+
   abstract class MutableType(var name: String = "unnamed") extends Type
-  class MutableStruct(name: String) extends MutableType(name) with dualis.Struct {
+  class MutableStruct(name: String) extends MutableType(name) with StructImpl {
     private val _members = new LinkedHashMap[String, Type]
     def add(member: (String, Type)): Unit = _members += member
     def remove(name: String): Unit = _members remove name   
     
     def find(name: String): Option[Type] = _members get name
-    def members = _members.toList
+    override def members = _members.toList
   }
-  class FixedArray(var elementType: Type, var length: Long) extends MutableType with dualis.FixedArray
+  class MutableFixedArray(var elementType: Type, var length: Long) 
+    extends MutableType with dualis.FixedArray with impl.FixedArrayImpl
+
+  import java.io._
+  class FileByteArray(f: File) extends ByteArray {
+    import java.nio._
+    
+    val raFile = new RandomAccessFile(f,"r")
+    val channel = raFile.getChannel
+
+    override def size = f.length
+    override def bytesAt(pos: Int, length: Int) = {
+      val buffer = ByteBuffer.allocate(length)
+      channel.read(buffer, pos)
+      buffer
+    }
+  }
 }
 
 object Dualis {
@@ -107,8 +194,10 @@ object Dualis {
   }
 
   def repl(file: ByteArray) {
-    //val root = new impl.MutableStruct("unnamed")
-    //root.add("bytes" -> new impl.FixedArray(Primitives.Byte, file.size))
+    val root = new impl.MutableStruct("unnamed")
+    root.add("bytes" -> new impl.MutableFixedArray(impl.Primitives.Byte, file.size))
+
+    var instance = root.parse(file, 0)
 
     while(true) {
       print("> ")
@@ -119,7 +208,7 @@ object Dualis {
   }
   def main(args: Array[String]) {
     println("Hello")
-    repl(null)
+    repl(new impl.FileByteArray(new File(args(0))))
   }
 }
 
