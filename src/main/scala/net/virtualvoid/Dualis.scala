@@ -164,18 +164,41 @@ package impl {
       val (myRange, nextRange) = range.consume(bytes)
       (nextRange, SimpleInstance(this, myRange))
     }
+    def format: String
+    def repr(t: T): String = format format t
+    override def repr(i: Instance): String =
+      repr(valueOf(i))
+  }
+  trait PrimitiveMultiByteType[T] { self: PrimitiveType[T] =>
+    def isBigEndian: Boolean
+    def valueOf(bytes: Array[Int]): T
+
+    def interpretAsInt(b: scala.Byte): scala.Int = 0xff & b.toInt
+    def valueOf(i: Instance): T = {
+      val bs = i.range.dataBytes map interpretAsInt
+      // do all processing in big endian
+      valueOf(if (isBigEndian) bs else bs.reverse)
+    }
   }
 
   object Primitives {
     case object Byte extends PrimitiveType[scala.Byte]("Byte", 1) {
-      def repr(i: Instance): String = "%02x" format i.range.data.get
+      val format = "%02x"
       def valueOf(i: Instance): scala.Byte = i.range.data.get
+    }
+    case class Short(override val isBigEndian: Boolean) extends PrimitiveType[scala.Short]("Short", 2)
+      with PrimitiveMultiByteType[scala.Short] {
+      
+      def format = "%04x"
+      def valueOf(bytes: Array[Int]) = ((bytes(0) << 8 & 0xffff) | bytes(1)).toShort
     }
 
     case class PrimitiveValue[T](tpe: dualis.PrimitiveType[T], value: T)
-    val SingleByte = "([0-9a-f]{2})".r
+    val ByteValue = "0x([0-9a-f]{2})".r
+    val ShortValue = "(b?)0x([0-9a-f]{4})".r
     def parseLiteral(str: String): Option[PrimitiveValue[_]] = optional(str) {
-      case SingleByte(b) => PrimitiveValue[scala.Byte](Byte, java.lang.Short.parseShort(b, 16).toByte)
+      case ByteValue(b) => PrimitiveValue[scala.Byte](Byte, java.lang.Short.parseShort(b, 16).toByte)
+      case ShortValue(be, value) => PrimitiveValue(Short(be == "b"), java.lang.Integer.parseInt(value, 16).toShort)
     }
   }
 
@@ -295,16 +318,18 @@ package impl {
 object Dualis {
   object Commands {
     object TypeNameOf {
-      val Types =
-        Map("b" -> impl.Primitives.Byte)
-      def unapply(name: String): Option[Type] = Types.get(name)
+      val Types: Map[String, Boolean => Type] =
+        Map("b" -> (_ => impl.Primitives.Byte),
+            "s" -> (impl.Primitives.Short(_))
+           )
+      def unapply(name: String): Option[Boolean => Type] = Types.get(name)
     }
     object CreateNamedElement {
-      val CreatePrimitive = "(\\w*) (\\w*)".r
+      val CreatePrimitive = "(>?)(\\w*) (\\w*)".r
       val CreateConstant = "constant (\\w*) (.*)".r
       def unapply(cmd: String): Option[(Type, String)] = cmd match {
-        case CreatePrimitive(TypeNameOf(tpe), memberName) =>
-          Some(tpe, memberName)
+        case CreatePrimitive(be, TypeNameOf(tpeCons), memberName) =>
+          Some(tpeCons(be == ">"), memberName)
         case CreateConstant(name, value) => impl.Primitives.parseLiteral(value) match {
           case Some(value) => Some(impl.Constant(value), name)
           case None => 
