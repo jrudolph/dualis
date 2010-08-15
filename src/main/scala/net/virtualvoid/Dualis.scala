@@ -257,9 +257,9 @@ object Dualis {
       def unapply(name: String): Option[Type] = Types.get(name)
     }
     object CreateNamedElement {
-      val Create = "(\\w*) (\\w*)".r
+      val CreatePrimitive = "(\\w*) (\\w*)".r
       def unapply(cmd: String): Option[(Type, String)] = cmd match {
-        case Create(TypeNameOf(tpe), memberName) =>
+        case CreatePrimitive(TypeNameOf(tpe), memberName) =>
           Some(tpe, memberName)
         case _ => None
       }
@@ -272,24 +272,34 @@ object Dualis {
   def readLine = reader.readLine
 
   def repl(file: ByteArray) {
-    val root = new impl.MutableStruct("unnamed")
+    val Root = new impl.MutableStruct("unnamed")
+    val completeFile = impl.ByteRange(file, 0, file.size.toInt)
+    var typeStack: List[(impl.MutableStruct, ByteRange)] = List((Root, completeFile))
+
+    def cur: impl.MutableStruct = typeStack.head._1
 
     val Exit = "exit|\u0004".r
     val Rename = "name (\\w*)".r
+    val Down = ".."
     import Commands._
     def dispatch(cmd: String) = cmd match {
       case Exit() | null => exit(0)
-      case Rename(name) => root.name = name
+      case Rename(name) => cur.name = name
       case CreateNamedElement(tpe, name) => 
         println("Creating "+name+" of type "+tpe)
-        root.add(name -> tpe)
+        cur.add(name -> tpe)
+      case Down => typeStack match {
+        case (Root,_)::Nil =>
+        case _::rest =>
+          typeStack = rest
+      }
       case _ => println("Command not found: '"+cmd+"'")
     }
 
     while(true) {
-      val (_, instance) = root.parse(impl.ByteRange(file, 0, file.size.toInt))
+      val (_, instance) = cur.parse(typeStack.head._2)
 
-      println("root: "+root.name+" = "+instance.repr+"\n")
+      println("root: "+cur.name+" = "+instance.repr+"\n")
       print("> ")
       val cmd = readLine
 
