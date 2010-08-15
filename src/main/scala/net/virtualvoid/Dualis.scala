@@ -18,8 +18,13 @@ trait Type {
 
   def parse(range: ByteRange): (ByteRange, Instance)
   def repr(instance: Instance): String
+  
   //def length: Option[Long]
   //def valueToString(
+}
+
+trait PrimitiveType[T] extends Type {
+  def valueOf(instance: Instance): T
 }
 
 /**
@@ -32,10 +37,10 @@ trait Struct extends Type {
 }
 
 /**
- * A constant magic number expected at some position
+ * A constant expected at some position
  */
-trait MagicNumber extends Type {
-  def bytes: Array[Byte]
+trait Constant[T] extends Type {
+//  def value: T
 }
 
 trait InstanceArray extends Type {
@@ -101,6 +106,23 @@ trait CompositeInstance extends InstanceCollection {
 trait Covering
 
 
+object Tools {
+  val esc = "\u001b"
+  val csi = esc+"["
+
+  val reset: String = csi+"0m"
+  val red: String = csi+"31m"
+  val green: String = csi+"32m"
+  
+  def red(str: String): String = red + str + reset
+  def green(str: String): String = green + str + reset
+
+  def optional[T, U](t: T)(f: PartialFunction[T, U]) =
+    f.lift(t)
+}
+
+import Tools._
+
 package impl {
   import net.virtualvoid.dualis
   
@@ -137,7 +159,7 @@ package impl {
 
   case class SimpleInstance(val tpe: Type, val range: dualis.ByteRange) extends Instance
 
-  abstract class PrimitiveType(val name: String, bytes: Int) extends Type {
+  abstract class PrimitiveType[T](val name: String, bytes: Int) extends Type with dualis.PrimitiveType[T] {
     override def parse(range: dualis.ByteRange): (dualis.ByteRange, Instance) = {
       val (myRange, nextRange) = range.consume(bytes)
       (nextRange, SimpleInstance(this, myRange))
@@ -145,8 +167,29 @@ package impl {
   }
 
   object Primitives {
-    case object Byte extends PrimitiveType("Byte", 1) {
+    case object Byte extends PrimitiveType[scala.Byte]("Byte", 1) {
       def repr(i: Instance): String = "%02x" format i.range.data.get
+      def valueOf(i: Instance): scala.Byte = i.range.data.get
+    }
+
+    case class PrimitiveValue[T](tpe: dualis.PrimitiveType[T], value: T)
+    val SingleByte = "([0-9a-f]{2})".r
+    def parseLiteral(str: String): Option[PrimitiveValue[_]] = optional(str) {
+      case SingleByte(b) => PrimitiveValue[scala.Byte](Byte, java.lang.Short.parseShort(b, 16).toByte)
+    }
+  }
+
+  case class ConstantValue[T](val underlying: Instance, val correct: Boolean, val tpe: Type) extends Instance {
+    def range = underlying.range
+  }
+  case class Constant[T](value: Primitives.PrimitiveValue[T]) extends MutableType("Constant (%s)" format value.value) with dualis.Constant[T] {
+    override def parse(range: dualis.ByteRange): (dualis.ByteRange, Instance) = {
+      val (next, instance) = value.tpe.parse(range)
+      (next, ConstantValue[T](instance, value.tpe.valueOf(instance) == value.value, this))
+    }
+    override def repr(i: Instance): String = {
+      val c = i.asInstanceOf[ConstantValue[T]]
+      if (c.correct) green(c.underlying.repr) else red(c.underlying.repr)
     }
   }
 
@@ -171,7 +214,7 @@ package impl {
 
     override def repr(i: Instance): String = {
       val memberReprs =
-        i.asInstanceOf[CompositeInstance].namedMembers map { case (name, i) => name+": "+find(name).get.name+" = "+i.repr}
+        i.asInstanceOf[CompositeInstance].namedMembers map { case (name, i) => "%-30s = %s" format (name+": "+find(name).get.name, i.repr) }
       
       "{\n"+memberReprs.mkString("\t","\n\t","\n")+"}"
     }
@@ -258,9 +301,17 @@ object Dualis {
     }
     object CreateNamedElement {
       val CreatePrimitive = "(\\w*) (\\w*)".r
+      val CreateConstant = "constant (\\w*) (.*)".r
       def unapply(cmd: String): Option[(Type, String)] = cmd match {
         case CreatePrimitive(TypeNameOf(tpe), memberName) =>
           Some(tpe, memberName)
+        case CreateConstant(name, value) => impl.Primitives.parseLiteral(value) match {
+          case Some(value) => Some(impl.Constant(value), name)
+          case None => 
+            println("Unknown constant '"+value+"'")
+            None
+        }
+          
         case _ => None
       }
     }
@@ -292,6 +343,7 @@ object Dualis {
         case (Root,_)::Nil =>
         case _::rest =>
           typeStack = rest
+        case Nil => throw new RuntimeException("may not happen")
       }
       case _ => println("Command not found: '"+cmd+"'")
     }
