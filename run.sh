@@ -1,0 +1,1 @@
+scala -cp target/scala_2.8.0/classes net.virtualvoid.dualis.Dualis target/scala_2.8.0/classes/net/virtualvoid/dualis/Dualis.class
