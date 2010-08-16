@@ -111,11 +111,11 @@ object Tools {
   val csi = esc+"["
 
   val reset: String = csi+"0m"
-  val red: String = csi+"31m"
-  val green: String = csi+"32m"
+  val setRed: String = csi+"31m"
+  val setGreen: String = csi+"32m"
   
-  def red(str: String): String = red + str + reset
-  def green(str: String): String = green + str + reset
+  def red(str: String): String = setRed + str + reset
+  def green(str: String): String = setGreen + str + reset
 
   def optional[T, U](t: T)(f: PartialFunction[T, U]) =
     f.lift(t)
@@ -169,7 +169,7 @@ package impl {
     override def repr(i: Instance): String =
       repr(valueOf(i))
   }
-  trait PrimitiveMultiByteType[T] { self: PrimitiveType[T] =>
+  abstract class PrimitiveMultiByteType[T](_name: String, _bytes: Int) extends PrimitiveType[T](_name, _bytes) {
     def isBigEndian: Boolean
     def valueOf(bytes: Array[Int]): T
 
@@ -179,40 +179,47 @@ package impl {
       // do all processing in big endian
       valueOf(if (isBigEndian) bs else bs.reverse)
     }
+    override val name: String = (if (isBigEndian) ">" else "") + _name
   }
 
   object Primitives {
     case object Byte extends PrimitiveType[scala.Byte]("Byte", 1) {
-      val format = "%02x"
+      val format = "0x%02x"
       def valueOf(i: Instance): scala.Byte = i.range.data.get
     }
-    case class Short(override val isBigEndian: Boolean) extends PrimitiveType[scala.Short]("Short", 2)
-      with PrimitiveMultiByteType[scala.Short] {
-      
-      def format = "%04x"
-      def valueOf(bytes: Array[Int]) = ((bytes(0) << 8 & 0xffff) | bytes(1)).toShort
+    case class Short(override val isBigEndian: Boolean) extends PrimitiveMultiByteType[scala.Short]("Short", 2) {
+      def format = "0x%04x"
+      def valueOf(bytes: Array[Int]) = (bytes(0) << 8 | bytes(1)).toShort
+    }
+    case class Integer(override val isBigEndian: Boolean) extends PrimitiveMultiByteType[scala.Int]("Int", 4) {
+      def format = "0x%08x"
+      def valueOf(bytes: Array[Int]) = bytes(0) << 24 | bytes(1) << 16 | bytes(2) << 8 | bytes(3)
     }
 
-    case class PrimitiveValue[T](tpe: dualis.PrimitiveType[T], value: T)
+    case class PrimitiveValue[T](tpe: dualis.PrimitiveType[T], value: T) {
+      override def toString = value.toString+": "+tpe.name
+    }
     val ByteValue = "0x([0-9a-f]{2})".r
-    val ShortValue = "(b?)0x([0-9a-f]{4})".r
+    val ShortValue = "(>?)0x([0-9a-f]{4})".r
+    val IntegerValue = "(>?)0x([0-9a-f]{8})".r
     def parseLiteral(str: String): Option[PrimitiveValue[_]] = optional(str) {
       case ByteValue(b) => PrimitiveValue[scala.Byte](Byte, java.lang.Short.parseShort(b, 16).toByte)
-      case ShortValue(be, value) => PrimitiveValue(Short(be == "b"), java.lang.Integer.parseInt(value, 16).toShort)
+      case ShortValue(be, value) => PrimitiveValue(Short(be == ">"), java.lang.Integer.parseInt(value, 16).toShort)
+      case IntegerValue(be, value) => PrimitiveValue(Integer(be == ">"), java.lang.Long.parseLong(value,16).toInt)
     }
   }
 
   case class ConstantValue[T](val underlying: Instance, val correct: Boolean, val tpe: Type) extends Instance {
     def range = underlying.range
   }
-  case class Constant[T](value: Primitives.PrimitiveValue[T]) extends MutableType("Constant (%s)" format value.value) with dualis.Constant[T] {
+  case class Constant[T](value: Primitives.PrimitiveValue[T]) extends MutableType("Constant (%s)" format value) with dualis.Constant[T] {
     override def parse(range: dualis.ByteRange): (dualis.ByteRange, Instance) = {
       val (next, instance) = value.tpe.parse(range)
       (next, ConstantValue[T](instance, value.tpe.valueOf(instance) == value.value, this))
     }
     override def repr(i: Instance): String = {
       val c = i.asInstanceOf[ConstantValue[T]]
-      if (c.correct) green(c.underlying.repr) else red(c.underlying.repr)
+      (if (c.correct) green _ else red _)(c.underlying.repr)
     }
   }
 
@@ -320,7 +327,8 @@ object Dualis {
     object TypeNameOf {
       val Types: Map[String, Boolean => Type] =
         Map("b" -> (_ => impl.Primitives.Byte),
-            "s" -> (impl.Primitives.Short(_))
+            "s" -> (impl.Primitives.Short(_)),
+            "i" -> (impl.Primitives.Integer(_))
            )
       def unapply(name: String): Option[Boolean => Type] = Types.get(name)
     }
